@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"fmt"
 	"io/ioutil"
 	"log"
 	"net/http"
@@ -12,19 +13,53 @@ import (
 	"time"
 
 	"cloud.google.com/go/storage"
+
+	"golang.org/x/oauth2"
+	googleOAuth2 "golang.org/x/oauth2/google"
+
+	"github.com/dghubble/gologin"
+	"github.com/dghubble/gologin/google"
+	"github.com/dghubble/sessions"
+)
+
+// TODO: update these values
+const (
+	sessionName    = "example-google-app"
+	sessionSecret  = "example cookie signing secret"
+	sessionUserKey = "googleID"
 )
 
 var pathChecker = regexp.MustCompile("logs/[a-zA-Z_-]+/[0-9]+/[ a-zA-Z_-]+/[0-9]+")
 
+// sessionStore encodes and decodes session data stored in signed cookies
+var sessionStore = sessions.NewCookieStore([]byte(sessionSecret), nil)
+
 type prowBucketHandler struct {
-	bucket *storage.BucketHandle
-	tmpDir string
+	bucket       *storage.BucketHandle
+	tmpDir       string
+	clientID     string
+	clientSecret string
+	requestURL   string
 }
 
-func New(b *storage.BucketHandle, cacheDir, listenAddress string) *http.Server {
-	bucketHandler := &prowBucketHandler{bucket: b, tmpDir: cacheDir}
+func New(b *storage.BucketHandle, cacheDir, listenAddress, clientID, clientSecret string) *http.Server {
+	bucketHandler := &prowBucketHandler{bucket: b, tmpDir: cacheDir, clientID: clientID, clientSecret: clientSecret}
 	mux := &http.ServeMux{}
-	mux.HandleFunc("/", bucketHandler.router)
+	mux.HandleFunc("/", bucketHandler.welcomeHandler)
+	mux.HandleFunc("/logout", bucketHandler.logoutHandler)
+
+	oauth2Config := &oauth2.Config{
+		ClientID:     clientID,
+		ClientSecret: clientSecret,
+		RedirectURL:  "http://localhost:8080/google/callback", // TODO: change this!
+		Endpoint:     googleOAuth2.Endpoint,
+		Scopes:       []string{"email"},
+	}
+
+	stateConfig := gologin.DefaultCookieConfig
+	mux.Handle("/google/login", google.StateHandler(stateConfig, google.LoginHandler(oauth2Config, nil)))
+	mux.Handle("/google/callback", google.StateHandler(stateConfig, google.CallbackHandler(oauth2Config, bucketHandler.issueSession(), nil)))
+
 	return &http.Server{
 		Addr:         listenAddress,
 		Handler:      mux,
@@ -33,12 +68,62 @@ func New(b *storage.BucketHandle, cacheDir, listenAddress string) *http.Server {
 	}
 }
 
-func (pbh *prowBucketHandler) router(resp http.ResponseWriter, r *http.Request) {
+func (pbh *prowBucketHandler) welcomeHandler(resp http.ResponseWriter, r *http.Request) {
 	if strings.HasPrefix(r.URL.String(), "/logs") {
-		pbh.handleLogRequest(resp, r)
-		return
+		// save the URl for logs so that we can redirect to this later
+		pbh.requestURL = r.URL.String()
+
+		if isLoggedIn(r) {
+			pbh.handleLogRequest(resp, r)
+			return
+		}
+
+		// if the user is not logged in, ask them to login
+		page, _ := ioutil.ReadFile("login-page.html")
+		fmt.Fprintf(resp, string(page))
 	}
 	resp.WriteHeader(http.StatusNotFound)
+}
+
+// isLoggedIn returns true if the user has a signed session cookie.
+func isLoggedIn(req *http.Request) bool {
+	if _, err := sessionStore.Get(req, sessionName); err == nil {
+		return true
+	}
+	return false
+}
+
+// issueSession issues a cookie session after successful Google login
+func (pbh *prowBucketHandler) issueSession() http.Handler {
+	fn := func(w http.ResponseWriter, req *http.Request) {
+		ctx := req.Context()
+		googleUser, err := google.UserFromContext(ctx)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		// Issue a session to the user
+		session := sessionStore.New(sessionName)
+		session.Values[sessionUserKey] = googleUser.Id
+		session.Save(w)
+
+		if len(pbh.requestURL) == 0 {
+			log.Fatalf("requestURL is empty") // TODO: handle this better
+		}
+
+		// Once the user is logged in, redirect to the logs URL
+		http.Redirect(w, req, pbh.requestURL, http.StatusFound)
+	}
+	return http.HandlerFunc(fn)
+}
+
+// logoutHandler destroys the session on POSTs.
+func (pbh *prowBucketHandler) logoutHandler(w http.ResponseWriter, req *http.Request) {
+	if req.Method == "POST" {
+		sessionStore.Destroy(w, sessionName)
+	}
+	fmt.Fprint(w, `<p>You have successfully logged out!</p>`) // TODO: redirect to somewhere after logout?
 }
 
 func (pbh *prowBucketHandler) handleLogRequest(resp http.ResponseWriter, r *http.Request) {
