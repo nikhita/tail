@@ -20,7 +20,7 @@ func main() {
 	flag.StringVar(&listenPort, "listen-port", ":5000", "Port to listen on")
 	flag.Parse()
 
-	ctx := context.Background()
+	ctx = context.Background()
 	client, err := storage.NewClient(ctx)
 	if err != nil {
 		log.Fatalf("Failed to create storage client: %v", err)
