@@ -19,12 +19,12 @@ var (
 )
 
 func main() {
-	flag.StringVar(&bucketName, "bucket-name", "prow-data", "Name of the bucket.")
+	flag.StringVar(&bucketName, "bucket-name", "prow-data", "Name of the bucket where logs are stored.")
 	flag.StringVar(&cacheDir, "cache-dir", "./", "The directory to use for caching.")
-	flag.StringVar(&listenPort, "listen-port", ":5000", "Port to listen on.")
-	flag.StringVar(&publicRepos, "public-repos", "", "Comma separated list of public repos in format org/repo.")
-	flag.StringVar(&redirectURL, "redirect-url", "http://localhost:5000/github/callback", "The callback URL for the app. Should end with \"/github/callback\".")
-	flag.StringVar(&org, "org", "", "The GitHub organization name whose members can access these logs.")
+	flag.StringVar(&listenPort, "listen-port", ":8080", "Port to listen on.")
+	flag.StringVar(&publicRepos, "public-repos", "", "Comma separated list of public repos in format org/repo. Optional.")
+	flag.StringVar(&redirectURL, "redirect-url", "http://localhost:8080/github/callback", "The callback URL for the app. Should end with \"/github/callback\".")
+	flag.StringVar(&org, "org", "", "The GitHub organization name whose members can access these logs. Required.")
 	flag.Parse()
 
 	if org == "" {

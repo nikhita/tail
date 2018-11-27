@@ -25,8 +25,8 @@ var pathChecker = regexp.MustCompile("logs/[a-zA-Z_-]+/[0-9]+/[ 0-9a-zA-Z_-]+/[0
 var repoName = regexp.MustCompile("/logs/[a-zA-Z_-]+")
 
 const (
-	sessionName    = "prow github app"
-	sessionUserKey = "githubID"
+	sessionName    = "prow"
+	sessionUserKey = "username"
 )
 
 // sessionStore encodes and decodes session data stored in signed cookies
@@ -36,7 +36,6 @@ type prowBucketHandler struct {
 	bucket       *storage.BucketHandle
 	tmpDir       string
 	publicRepos  []string
-	requestedURL string
 	org          string
 	githubClient *gogithub.Client
 }
@@ -46,6 +45,7 @@ func New(b *storage.BucketHandle, cacheDir, listenAddress, clientID, clientSecre
 
 	mux := &http.ServeMux{}
 	mux.HandleFunc("/", bucketHandler.router)
+	mux.HandleFunc("/logout", logoutHandler)
 
 	oauth2Config := &oauth2.Config{
 		ClientID:     clientID,
@@ -53,7 +53,7 @@ func New(b *storage.BucketHandle, cacheDir, listenAddress, clientID, clientSecre
 		RedirectURL:  redirectURL,
 		Endpoint:     githubOAuth2.Endpoint,
 	}
-	stateConfig := gologin.DebugOnlyCookieConfig
+	stateConfig := gologin.DefaultCookieConfig
 	mux.Handle("/github/login", github.StateHandler(stateConfig, github.LoginHandler(oauth2Config, nil)))
 	mux.Handle("/github/callback", github.StateHandler(stateConfig, github.CallbackHandler(oauth2Config, bucketHandler.issueSession(), nil)))
 
@@ -66,8 +66,6 @@ func New(b *storage.BucketHandle, cacheDir, listenAddress, clientID, clientSecre
 }
 
 func (pbh *prowBucketHandler) router(resp http.ResponseWriter, req *http.Request) {
-	pbh.requestedURL = req.URL.Path
-
 	if strings.HasPrefix(req.URL.String(), "/logs") {
 		pbh.handleLogRequest(resp, req)
 		return
@@ -84,6 +82,14 @@ func (pbh *prowBucketHandler) router(resp http.ResponseWriter, req *http.Request
 	}
 }
 
+// logoutHandler destroys the session on POSTs and redirects to home.
+func logoutHandler(w http.ResponseWriter, req *http.Request) {
+	if req.Method == "POST" {
+		sessionStore.Destroy(w, sessionName)
+	}
+	http.Redirect(w, req, "/", http.StatusFound)
+}
+
 func (pbh *prowBucketHandler) handleLogRequest(resp http.ResponseWriter, req *http.Request) {
 	log.Printf("Got request for %s", req.URL.Path)
 	if !pathChecker.MatchString(req.URL.Path) {
@@ -91,8 +97,7 @@ func (pbh *prowBucketHandler) handleLogRequest(resp http.ResponseWriter, req *ht
 		return
 	}
 
-	// check if the requested repo is private.
-	// if it is private, point to the login page.
+	// check if the requested repo is private
 	match := repoName.FindStringSubmatch(req.URL.Path)
 	var repo string
 	if match != nil && len(match) == 1 {
@@ -100,12 +105,10 @@ func (pbh *prowBucketHandler) handleLogRequest(resp http.ResponseWriter, req *ht
 		repo = strings.Replace(repo[6:], "_", "/", -1)
 	}
 
-	if !contains(pbh.publicRepos, repo) {
-		if !isAuthenticated(req) {
-			page, _ := ioutil.ReadFile("pkg/handler/login.html")
-			fmt.Fprintf(resp, string(page))
-			return
-		}
+	if !contains(pbh.publicRepos, repo) && !isAuthenticated(req) {
+		page, _ := ioutil.ReadFile("pkg/handler/login.html")
+		fmt.Fprintf(resp, string(page))
+		return
 	}
 
 	pbh.showLogs(resp, req)
@@ -120,37 +123,34 @@ func (pbh *prowBucketHandler) issueSession() http.Handler {
 			http.Error(resp, err.Error(), http.StatusInternalServerError)
 			return
 		}
+		username := *githubUser.Login
 
-		isMember, _, err := pbh.githubClient.Organizations.IsMember(ctx, pbh.org, *githubUser.Login)
+		isMember, _, err := pbh.githubClient.Organizations.IsMember(ctx, pbh.org, username)
 		if err != nil {
 			http.Error(resp, err.Error(), http.StatusInternalServerError)
 			return
 		}
 
 		if !isMember {
-			_, err := fmt.Fprintf(resp, `<p> Hey, %s</p>`, *githubUser.Login)
+			_, err := fmt.Fprintf(resp, `Hey, %s`, username)
 			if err != nil {
 				http.Error(resp, err.Error(), http.StatusInternalServerError)
 				return
 			}
-			fmt.Fprintf(resp, `<p>Only members of the %s organisation are allowed to view this page. Looks like you are not a member. :(</p>`, pbh.org)
+			fmt.Fprintf(resp, `Only members of the %s organisation are allowed to view this page. Looks like you are not a member. :(`, pbh.org)
 			return
 		}
 
 		session := sessionStore.New(sessionName)
-		session.Values[sessionUserKey] = *githubUser.ID
+		session.Values[sessionUserKey] = username
 		session.Save(resp)
-		// TODO: we should redirect to the requested URL after authentication
-		// Somehow the session cookies does not seem to work and it unauthenticates everytime :/
-		// http.Redirect(w, req, pbh.requestedURL, http.StatusFound)
-		pbh.showLogs(resp, req)
-
+		http.Redirect(resp, req, req.Header.Get("Referer"), http.StatusFound)
 	}
 	return http.HandlerFunc(fn)
 }
 
+// showLogs displays the logs from the specified bucket.
 func (pbh *prowBucketHandler) showLogs(resp http.ResponseWriter, req *http.Request) {
-	// fmt.Fprint(resp, `LOOK AT THESE SHINY LOGS`)
 	bucketPath := strings.Replace(req.URL.Path, "/logs", "pr-logs/pull", 1)
 	bucketPath = bucketPath + "/build-log.txt"
 	cachePath := path.Join(pbh.tmpDir, strings.Replace(bucketPath, "/", "_", -1))
