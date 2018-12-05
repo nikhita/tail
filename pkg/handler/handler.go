@@ -72,12 +72,7 @@ func (pbh *prowBucketHandler) router(resp http.ResponseWriter, req *http.Request
 		return
 	}
 
-	if req.URL.Path != "/" {
-		http.NotFound(resp, req)
-		return
-	}
-
-	if !isAuthenticated(req) {
+	if req.URL.Path == "/" && !isAuthenticated(req) {
 		tmpl, err := template.ParseFiles("pkg/handler/login.html")
 		if err != nil {
 			log.Print(err)
